@@ -18,9 +18,24 @@ def get_similar_cached_question(query, embeddings, similarity_threshold=0.80):
     """
     try:
         cache = {
-            "O que é aprendizado supervisionado?": {
-                "embedding": embeddings.embed_query("O que é aprendizado supervisionado?"),
-                "resposta": "Aprendizado supervisionado é uma técnica de ML com dados rotulados."
+            "O que faz um Técnico em Administração?": {
+                "embedding": embeddings.embed_query("O que faz um Técnico em Administração?"),
+                "resposta": """
+                            Um Técnico em Administração desempenha uma variedade de funções que são essenciais para o funcionamento eficiente de uma organização. As responsabilidades podem variar dependendo do setor e da empresa, mas geralmente incluem:
+
+                            1. Organização e Gestão de Documentos: Manter o controle e a organização de arquivos e registros, garantindo que a documentação esteja acessível e atualizada.
+                            2. Gestão do Tempo: Priorizar e gerenciar tarefas de forma eficaz para cumprir prazos e garantir o fluxo contínuo das operações diárias.
+                            3. Comunicação Eficaz: Interagir com clientes, fornecedores e colegas de forma clara e profissional, seja por e-mail, telefone ou pessoalmente.
+                            4. Habilidades Tecnológicas: Utilizar ferramentas como Microsoft 365 e Google Workspace para criar documentos, planilhas, apresentações e gerenciar e-mails e calendários.
+                            5. Atenção aos Detalhes: Garantir que todas as tarefas e documentos sejam precisos e completos, minimizando erros que possam impactar o negócio.
+                            6. Resolução de Problemas: Identificar e resolver problemas operacionais de forma rápida e eficaz, muitas vezes usando criatividade e pensamento crítico.
+                            7. Multitarefa: Gerenciar múltiplas responsabilidades simultaneamente, adaptando-se rapidamente a novas tarefas e prioridades.
+                            8. Atendimento ao Cliente: Servir como ponto de contato inicial para clientes, fornecendo informações e suporte conforme necessário.
+                            9. Gerenciamento de Projetos: Auxiliar na coordenação e execução de projetos, garantindo que as etapas sejam concluídas no prazo e dentro do orçamento.
+                            10. Discrição e Confidencialidade: Lidar com informações sensíveis com cuidado e manter a confidencialidade em todas as transações e comunicações.
+
+                            Essas habilidades e responsabilidades tornam o Técnico em Administração uma peça fundamental em muitas organizações, facilitando operações suaves e eficientes. As informações acima foram baseadas no contexto fornecido pela fonte Técnica Geração.
+                            """
             },
             "Como funciona o Redis?": {
                 "embedding": embeddings.embed_query("Como funciona o Redis?"),
