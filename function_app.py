@@ -5,23 +5,57 @@ import azure.functions as func
 import redis
 import numpy as np
 from redis.commands.search.query import Query
+from sklearn.metrics.pairwise import cosine_similarity
 from langchain_openai import OpenAIEmbeddings
 from openai import OpenAI
 
 # Configure logging settings
 logging.basicConfig(level=logging.INFO)
 
+def get_similar_cached_question(query, embeddings, similarity_threshold=0.80):
+    """
+    Verifica se há uma pergunta similar no cache.
+    """
+    try:
+        cache = {
+            "O que é aprendizado supervisionado?": {
+                "embedding": embeddings.embed_query("O que é aprendizado supervisionado?"),
+                "resposta": "Aprendizado supervisionado é uma técnica de ML com dados rotulados."
+            },
+            "Como funciona o Redis?": {
+                "embedding": embeddings.embed_query("Como funciona o Redis?"),
+                "resposta": "Redis é um banco de dados em memória usado para cache e mensagens."
+            }
+        }
+
+        logging.info(f"Verificando similaridade da query: {query}")
+        query_embedding = embeddings.embed_query(query)
+        query_vec = np.array(query_embedding, dtype=np.float32).reshape(1, -1)
+
+        best_match = None
+        best_score = -1.0
+
+        for cached_q, data in cache.items():
+            cached_vec = np.array(data["embedding"], dtype=np.float32).reshape(1, -1)
+            score = cosine_similarity(query_vec, cached_vec)[0][0]
+            logging.info(f"Similaridade com '{cached_q}': {score:.4f}")
+
+            if score > best_score:
+                best_score = score
+                best_match = (cached_q, data["resposta"])
+
+        if best_score >= similarity_threshold:
+            logging.info(f"Pergunta similar encontrada: '{best_match[0]}' com similaridade {best_score:.4f}")
+            return best_match
+
+        logging.info(f"Nenhuma pergunta similar encontrada (máx similaridade: {best_score:.4f})")
+        return None
+
+    except Exception as e:
+        logging.error(f"Erro ao buscar pergunta similar no cache: {e}")
+        return None
+
 def retrieve_context_from_redis(query, redis_client, embeddings, top_n=5):
-    """
-    Retrieve relevant context from Redis using the provided query and embeddings.
-
-    :param query: The search query to be embedded and used in the Redis search.
-    :param redis_client: The Redis client used for accessing the Redis database.
-    :param embeddings: The OpenAIEmbeddings object used for creating the query embedding.
-    :param top_n: The number of top results to retrieve from Redis.
-    :return: The concatenated string of relevant context retrieved from Redis.
-    """
-
     try:
         logging.info("--->Embedding query")
         # Measure time taken to embed the query
@@ -73,7 +107,7 @@ def get_openai_response(messages, model, api_key, url_llm, request_data_params):
     
     try:
         # Initialize OpenAI client with custom or default URL
-        client = OpenAI(api_key=api_key, base_url=url_llm) if len(url_llm)>1 else OpenAI(api_key=api_key)
+        client = OpenAI(api_key=api_key, base_url=url_llm) if len(url_llm) > 1 else OpenAI(api_key=api_key)
         logging.info(f"OpenAI client initialized with model: {model}")
 
         # Measure time taken to generate a response
@@ -115,7 +149,6 @@ async def main(req: func.HttpRequest) -> func.HttpResponse:
     start_time = time.time()
 
     try:
-        # Parse JSON body from the request
         req_body = req.get_json()
         logging.debug(f"Request body: {req_body}")
 
@@ -145,6 +178,11 @@ async def main(req: func.HttpRequest) -> func.HttpResponse:
         embeddings = OpenAIEmbeddings(model=openai_embedding_model, openai_api_key=openai_embedding_key)
         logging.info("Connected to OpenAI Embedding Model")
 
+        similar_result = get_similar_cached_question(query, embeddings, similarity_threshold=0.80)
+        if similar_result:
+            pergunta_cache, resposta = similar_result
+            logging.info(f"Resposta reutilizada do cache: {pergunta_cache}")
+            return func.HttpResponse(resposta, status_code=200)
         # Connect to Redis database
         try:
             r = redis.Redis(
