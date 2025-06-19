@@ -7,6 +7,7 @@ import numpy as np
 from redis.commands.search.query import Query
 from langchain_openai import OpenAIEmbeddings
 from openai import OpenAI
+from azurefunctions.extensions.http.fastapi import StreamingResponse, Request
 
 # Configure logging settings
 logging.basicConfig(level=logging.INFO)
@@ -79,33 +80,25 @@ def get_openai_response(messages, model, api_key, url_llm, request_data_params, 
     client = OpenAI(api_key=api_key, base_url=url_llm) if url_llm else OpenAI(api_key=api_key)
     logging.info(f"OpenAI client ready with model: {model}")
 
-    def event_stream():
+    def event_generator():
         try:
-            stream = client.chat.completions.create(
-                model=model,
-                messages=messages,
-                **params
-            )
-            for chunk in stream:
-                delta = chunk.choices[0].delta.get('content', '')
-                if delta:
-                    yield f"data: {delta}\n\n"
-        except Exception as e:
-            logging.error(f"Error during streaming: {e}")
-            yield f"event: error\ndata: {e}\n\n"
+            for chunk in client.chat.completions.create(model=model, messages=messages, **params):
+                delta = chunk.choices[0].delta
+                text = delta.content or ""
+                if text:
+                    yield f"data: {text}\n\n"
+        except Exception as ex:
+            logging.error(f"Streaming error: {ex}")
+            yield f"event: error\ndata: {ex}\n\n"
         finally:
             total = time.time() - start_time
-            logging.info(f"Total execution time: {total:.4f} seconds")
+            logging.info(f"Total time: {total:.4f}s")
             yield "event: end\ndata: [DONE]\n\n"
 
-    return func.HttpResponse(
-        body=event_stream(),
-        status_code=200,
-        mimetype="text/event-stream; charset=utf-8"
-    )
+    return StreamingResponse(event_generator(), media_type="text/event-stream; charset=utf-8")
 
 @app.route(route="RAG", methods=["POST"])
-async def main(req: func.HttpRequest) -> func.HttpResponse:
+async def main(req: Request) -> StreamingResponse:
     """
     Azure Function endpoint to process requests for generating responses using RAG (Retrieve and Generate).
 
@@ -119,12 +112,12 @@ async def main(req: func.HttpRequest) -> func.HttpResponse:
 
     # Parse request body
     try:
-        # Parse JSON body from the request
-        req_body = req.get_json()
+        # Parse JSON body from the requestFhtt
+        req_body = await req.json()
         logging.debug(f"Request body: {req_body}")
-    except ValueError as e:
+    except Exception as e:
         logging.error(f"Error parsing request JSON: {e}")
-        return func.HttpResponse(f"Invalid JSON: {e}", status_code=400)
+        return StreamingResponse((f"event: error\ndata: Invalid JSON: {e}\n\n" for _ in []), status_code=400, media_type="text/event-stream")
 
     # Extract required parameters from the request body
     redis_host = req_body.get('redis_host')
@@ -149,7 +142,7 @@ async def main(req: func.HttpRequest) -> func.HttpResponse:
     ]
     if not all(required):
         logging.warning("Missing one or more required parameters.")
-        return func.HttpResponse("Missing required parameters.", status_code=400)
+        return StreamingResponse((f"event: error\ndata: Missing required parameters\n\n" for _ in []), status_code=400, media_type="text/event-stream")
 
     # Initialize embeddings and Redis
     os.environ["OPENAI_API_KEY"] = openai_embedding_key
@@ -160,14 +153,14 @@ async def main(req: func.HttpRequest) -> func.HttpResponse:
         logging.info("Connected to Redis")
     except Exception as e:
         logging.error(f"Error connecting to Redis: {e}")
-        return func.HttpResponse(f"Redis connection error: {e}", status_code=500)
+        return StreamingResponse((f"event: error\ndata: Redis connection error: {e}\n\n" for _ in []), status_code=500, media_type="text/event-stream")
 
     # Retrieve context
     try:
         context = retrieve_context_from_redis(query, r, embeddings, top_n)
     except Exception as e:
         logging.error(f"Error retrieving context: {e}")
-        return func.HttpResponse(f"Context retrieval error: {e}", status_code=500)
+        return StreamingResponse((f"event: error\ndata: Context retrieval error: {e}\n\n" for _ in []), status_code=500, media_type="text/event-stream")
     finally:
         r.close()
         logging.info("Redis connection closed")
@@ -191,4 +184,4 @@ async def main(req: func.HttpRequest) -> func.HttpResponse:
         )
     except Exception as e:
         logging.error(f"Error initializing streaming response: {e}")
-        return func.HttpResponse(f"Streaming initialization error: {e}", status_code=500)
+        return StreamingResponse((f"event: error\ndata: Streaming initialization error: {e}\n\n" for _ in []), status_code=500, media_type="text/event-stream")
