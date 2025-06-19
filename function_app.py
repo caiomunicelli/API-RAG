@@ -4,78 +4,21 @@ import time
 import azure.functions as func
 import redis
 import numpy as np
+import requests
 from redis.commands.search.query import Query
 from sklearn.metrics.pairwise import cosine_similarity
 from langchain_openai import OpenAIEmbeddings
 from openai import OpenAI
 
+
 # Configure logging settings
 logging.basicConfig(level=logging.INFO)
 
-def get_similar_cached_question(query, embeddings, similarity_threshold=0.80):
-    """
-    Verifica se há uma pergunta similar no cache.
-    """
-    try:
-        cache = {
-            "O que faz um Técnico em Administração?": {
-                "embedding": embeddings.embed_query("O que faz um Técnico em Administração?"),
-                "resposta": """
-                            Um Técnico em Administração desempenha uma variedade de funções que são essenciais para o funcionamento eficiente de uma organização. As responsabilidades podem variar dependendo do setor e da empresa, mas geralmente incluem:
-
-                            1. Organização e Gestão de Documentos: Manter o controle e a organização de arquivos e registros, garantindo que a documentação esteja acessível e atualizada.
-                            2. Gestão do Tempo: Priorizar e gerenciar tarefas de forma eficaz para cumprir prazos e garantir o fluxo contínuo das operações diárias.
-                            3. Comunicação Eficaz: Interagir com clientes, fornecedores e colegas de forma clara e profissional, seja por e-mail, telefone ou pessoalmente.
-                            4. Habilidades Tecnológicas: Utilizar ferramentas como Microsoft 365 e Google Workspace para criar documentos, planilhas, apresentações e gerenciar e-mails e calendários.
-                            5. Atenção aos Detalhes: Garantir que todas as tarefas e documentos sejam precisos e completos, minimizando erros que possam impactar o negócio.
-                            6. Resolução de Problemas: Identificar e resolver problemas operacionais de forma rápida e eficaz, muitas vezes usando criatividade e pensamento crítico.
-                            7. Multitarefa: Gerenciar múltiplas responsabilidades simultaneamente, adaptando-se rapidamente a novas tarefas e prioridades.
-                            8. Atendimento ao Cliente: Servir como ponto de contato inicial para clientes, fornecendo informações e suporte conforme necessário.
-                            9. Gerenciamento de Projetos: Auxiliar na coordenação e execução de projetos, garantindo que as etapas sejam concluídas no prazo e dentro do orçamento.
-                            10. Discrição e Confidencialidade: Lidar com informações sensíveis com cuidado e manter a confidencialidade em todas as transações e comunicações.
-
-                            Essas habilidades e responsabilidades tornam o Técnico em Administração uma peça fundamental em muitas organizações, facilitando operações suaves e eficientes. As informações acima foram baseadas no contexto fornecido pela fonte Técnica Geração.
-                            """
-            },
-            "Como funciona o Redis?": {
-                "embedding": embeddings.embed_query("Como funciona o Redis?"),
-                "resposta": "Redis é um banco de dados em memória usado para cache e mensagens."
-            }
-        }
-
-        logging.info(f"Verificando similaridade da query: {query}")
-        query_embedding = embeddings.embed_query(query)
-        query_vec = np.array(query_embedding, dtype=np.float32).reshape(1, -1)
-
-        best_match = None
-        best_score = -1.0
-
-        for cached_q, data in cache.items():
-            cached_vec = np.array(data["embedding"], dtype=np.float32).reshape(1, -1)
-            score = cosine_similarity(query_vec, cached_vec)[0][0]
-            logging.info(f"Similaridade com '{cached_q}': {score:.4f}")
-
-            if score > best_score:
-                best_score = score
-                best_match = (cached_q, data["resposta"])
-
-        if best_score >= similarity_threshold:
-            logging.info(f"Pergunta similar encontrada: '{best_match[0]}' com similaridade {best_score:.4f}")
-            return best_match
-
-        logging.info(f"Nenhuma pergunta similar encontrada (máx similaridade: {best_score:.4f})")
-        return None
-
-    except Exception as e:
-        logging.error(f"Erro ao buscar pergunta similar no cache: {e}")
-        return None
-
-def retrieve_context_from_redis(query, redis_client, embeddings, top_n=5):
+def retrieve_context_from_redis(query_embedding, redis_client, top_n=5):
     try:
         logging.info("--->Embedding query")
         # Measure time taken to embed the query
         start_time = time.time()
-        query_embedding = embeddings.embed_query(query)
         query_embedding_np = np.array(query_embedding, dtype=np.float32)
         embedding_time = time.time() - start_time
         logging.info(f"Embedding time: {embedding_time:.4f} seconds")
@@ -148,6 +91,41 @@ def get_openai_response(messages, model, api_key, url_llm, request_data_params):
         logging.error(f"Error calling OpenAI API: {e}")
         raise
 
+def retrieve_cache_from_semantic_api(embeddings,semantic_cache_endpoint):
+    """
+    Recupera o cache de perguntas da API externa de cache semântico.
+    """
+    url = semantic_cache_endpoint
+    headers = {"Content-Type": "application/json"}
+    payload = {
+        "embeddings": embeddings
+    }
+    try:
+        response = requests.post(url, headers=headers, json=payload, timeout=10)
+        response.raise_for_status()
+        return response.json() 
+    except requests.RequestException as e:
+        logging.error(f"Erro ao recuperar cache semântico: {e}")
+        return None
+
+def write_cache_to_semantic_api(query_embedding, store_cache_endpoint, response):
+    """
+    Grava o cache de perguntas na API externa de cache semântico.
+    """
+    url = store_cache_endpoint
+    headers = {"Content-Type": "application/json"}
+    payload = {
+        "content": response,
+        "embedding": query_embedding
+    }
+    try:
+        response = requests.post(url, headers=headers, json=payload, timeout=10)
+        response.raise_for_status()
+        return response.json()
+    except requests.RequestException as e:
+        logging.error(f"Erro ao gravar cache semântico: {e}")
+        return None
+
 app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
 
 @app.route(route="RAG", methods=["POST"])
@@ -171,6 +149,8 @@ async def main(req: func.HttpRequest) -> func.HttpResponse:
         redis_host = req_body.get('redis_host')
         redis_port = req_body.get('redis_port')
         redis_password = req_body.get('redis_password')
+        semantic_cache_endpoint = req_body.get('semantic_cache_endpoint')
+        store_cache_endpoint = req_body.get('store_cache_endpoint') 
         openai_embedding_key = req_body.get('openai_embedding_key')
         openai_embedding_model = req_body.get('openai_embedding_model')
         openai_llm_key = req_body.get('openai_llm_key')
@@ -193,11 +173,6 @@ async def main(req: func.HttpRequest) -> func.HttpResponse:
         embeddings = OpenAIEmbeddings(model=openai_embedding_model, openai_api_key=openai_embedding_key)
         logging.info("Connected to OpenAI Embedding Model")
 
-        similar_result = get_similar_cached_question(query, embeddings, similarity_threshold=0.80)
-        if similar_result:
-            pergunta_cache, resposta = similar_result
-            logging.info(f"Resposta reutilizada do cache: {pergunta_cache}")
-            return func.HttpResponse(resposta, status_code=200)
         # Connect to Redis database
         try:
             r = redis.Redis(
@@ -213,10 +188,22 @@ async def main(req: func.HttpRequest) -> func.HttpResponse:
         # Log about conections time
         conections_time = time.time() - start_time
         logging.info(f"Function conections time: {conections_time:.4f} seconds")
-
+        query_embedding = embeddings.embed_query(query)
+        try:
+            # Recupera cache semântico de perguntas
+            cache_result = retrieve_cache_from_semantic_api(
+                embeddings==query_embedding,
+                semantic_cache_endpoint=semantic_cache_endpoint,
+            )
+            if cache_result:
+                logging.info(f"Cache encontrado: {cache_result}")
+                return func.HttpResponse(str(cache_result), status_code=200)
+        except Exception as e:
+            logging.error(f"Erro ao recuperar cache semântico: {e}")
+        # Se não encontrou cache, grava no cache após gerar resposta
         # Retrieve context from Redis
         try:
-            context = retrieve_context_from_redis(query, r, embeddings, top_n)
+            context = retrieve_context_from_redis(query_embedding, r, top_n)
         except Exception as e:
             logging.error(f"Error retrieving context from Redis: {e}")
             return func.HttpResponse(f"Error retrieving context from Redis: {str(e)}", status_code=500)
@@ -236,6 +223,12 @@ async def main(req: func.HttpRequest) -> func.HttpResponse:
         except Exception as e:
             logging.error(f"Error calling OpenAI API: {e}")
             return func.HttpResponse(f"Error calling OpenAI API: {str(e)}", status_code=502)
+
+        # Grava no cache semântico se não encontrou antes
+        try:
+            write_cache_to_semantic_api(query_embedding=query_embedding, store_cache_endpoint=store_cache_endpoint,response=response_content )
+        except Exception as e:
+            logging.error(f"Erro ao gravar cache semântico: {e}")
 
         # Check if response is complete and return it
         if response_content:
