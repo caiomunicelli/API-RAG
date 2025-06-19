@@ -91,19 +91,20 @@ def get_openai_response(messages, model, api_key, url_llm, request_data_params):
         logging.error(f"Error calling OpenAI API: {e}")
         raise
 
-def retrieve_cache_from_semantic_api(embeddings,semantic_cache_endpoint):
+def retrieve_cache_from_semantic_api(embedding, semantic_cache_endpoint):
     """
     Recupera o cache de perguntas da API externa de cache semântico.
+    Retorna uma string (conteúdo do cache ou mensagem de erro).
     """
     url = semantic_cache_endpoint
     headers = {"Content-Type": "application/json"}
     payload = {
-        "embeddings": embeddings
+        "embedding": embedding
     }
     try:
         response = requests.post(url, headers=headers, json=payload, timeout=10)
         response.raise_for_status()
-        return response.json() 
+        return response.text  # Retorna string
     except requests.RequestException as e:
         logging.error(f"Erro ao recuperar cache semântico: {e}")
         return None
@@ -111,6 +112,7 @@ def retrieve_cache_from_semantic_api(embeddings,semantic_cache_endpoint):
 def write_cache_to_semantic_api(query_embedding, store_cache_endpoint, response):
     """
     Grava o cache de perguntas na API externa de cache semântico.
+    Retorna uma string (resposta da API ou mensagem de erro).
     """
     url = store_cache_endpoint
     headers = {"Content-Type": "application/json"}
@@ -121,7 +123,7 @@ def write_cache_to_semantic_api(query_embedding, store_cache_endpoint, response)
     try:
         response = requests.post(url, headers=headers, json=payload, timeout=10)
         response.raise_for_status()
-        return response.json()
+        return response.text  # Retorna string
     except requests.RequestException as e:
         logging.error(f"Erro ao gravar cache semântico: {e}")
         return None
@@ -192,7 +194,7 @@ async def main(req: func.HttpRequest) -> func.HttpResponse:
         try:
             # Recupera cache semântico de perguntas
             cache_result = retrieve_cache_from_semantic_api(
-                embeddings==query_embedding,
+                embedding=query_embedding,
                 semantic_cache_endpoint=semantic_cache_endpoint,
             )
             if cache_result:
