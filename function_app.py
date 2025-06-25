@@ -1,253 +1,256 @@
-import re
 import logging
 import os
-import tempfile
 import time
 import azure.functions as func
 import redis
 import numpy as np
-from azure.storage.blob import BlobServiceClient
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.schema import Document
+import requests
+from redis.commands.search.query import Query
+from sklearn.metrics.pairwise import cosine_similarity
 from langchain_openai import OpenAIEmbeddings
-from redis.commands.search.field import VectorField, TextField
-from redis.commands.search.indexDefinition import IndexDefinition, IndexType
- 
-# Configurar logging settings
+from openai import OpenAI
+
+
+# Configure logging settings
 logging.basicConfig(level=logging.INFO)
- 
-# Função para sanitizar o nome do arquivo
-def sanitize_filename(filename):
-    # Substitui caracteres inválidos por "_"
-    filename = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', filename)
-    # Remove pontos e underscores consecutivos
-    filename = re.sub(r'\.+', '.', filename)
-    filename = re.sub(r'_+', '_', filename)
-    # Remove ponto ou underscore do início e fim do nome do arquivo
-    filename = filename.strip('._ ')
-    return filename
- 
-# Funções para extrair texto de diferentes formatos de arquivo
-def extract_text_from_pdf(file_path):
-    import fitz  # PyMuPDF
-    doc = fitz.open(file_path)
-    text = ""
-    for page in doc:
-        text += page.get_text()
-    return text
- 
-def extract_text_from_docx(file_path):
-    import docx
-    doc = docx.Document(file_path)
-    text = ""
-    for para in doc.paragraphs:
-        text += para.text + "\n"
-    return text
- 
-def extract_text_from_txt(file_path):
-    with open(file_path, 'r', encoding='utf-8') as file:
-        return file.read()
- 
-# Função para gerar embeddings com tentativas de repetição em caso de falha
-def get_embeddings_with_retry(texts, embeddings, max_retries=5, delay=2):
-    retries = 0
-    while retries < max_retries:
-        try:
-            return embeddings.embed_documents(texts)
-        except Exception as e:
-            if "Service Unavailable" in str(e):
-                retries += 1
-                time.sleep(delay)
-            else:
-                raise e
-    raise Exception("Max retries exceeded for embedding service.")
- 
-# Função para criar o índice no Redis
-def create_redis_index(redis_client, index_name, dimension):
+
+def retrieve_context_from_redis(query_embedding, redis_client, top_n=5):
     try:
-        redis_client.ft(index_name).info()
-    except:
-        schema = [
-            TextField("content"),
-            VectorField("embedding", "HNSW", {
-                "TYPE": "FLOAT32",
-                "DIM": dimension,
-                "DISTANCE_METRIC": "COSINE",
-                "M": 16,                  # grau de conectividade
-                "EF_CONSTRUCTION": 200   # precisão/construção
-            })
-        ]
-        definition = IndexDefinition(prefix=["doc:"], index_type=IndexType.HASH)
-        redis_client.ft(index_name).create_index(schema, definition=definition)
- 
+        logging.info("--->Embedding query")
+        # Measure time taken to embed the query
+        start_time = time.time()
+        query_embedding_np = np.array(query_embedding, dtype=np.float32)
+        embedding_time = time.time() - start_time
+        logging.info(f"Embedding time: {embedding_time:.4f} seconds")
+
+        # Prepare Redis query for KNN search
+        base_query = (Query(f"*=>[KNN {top_n} @embedding $vec AS score]")
+                      .sort_by("score")
+                      .return_fields("content", "score")
+                      .paging(0, top_n)
+                      .dialect(2))
+        query_params = {"vec": query_embedding_np.tobytes()}
+
+        logging.info("--->Retrieving context from Redis")
+        # Execute Redis query to retrieve context
+        logging.info(f"Executing Redis query: {base_query.query_string()}")
+        search_result = redis_client.ft("document_index").search(base_query, query_params)
+
+        # Concatenate and return the retrieved context
+        context = "\n".join([doc.content for doc in search_result.docs])
+        ##logging.info(f"Context retrieved: {context}")
+
+        # Log time taken to access Redis and retrieve context
+        redis_time = time.time() - (start_time + embedding_time)
+        logging.info(f"Redis access and context retrieval time: {redis_time:.4f} seconds")
+
+        return context
+
+    except Exception as e:
+        logging.error(f"Error retrieving context from Redis: {e}")
+        raise
+
+def get_openai_response(messages, model, api_key, url_llm, request_data_params):
+    """
+    Generate a response using the OpenAI API with the provided parameters.
+
+    :param messages: The conversation history to be sent to the OpenAI API.
+    :param model: The name of the OpenAI model to use for generating the response.
+    :param api_key: The API key for authenticating with OpenAI.
+    :param url_llm: The custom base URL for the OpenAI LLM, if specified.
+    :param request_data_params: Additional parameters for controlling the API's behavior.
+    :return: The generated response content from OpenAI.
+    """
+    logging.info("--->Calling OpenAI API")
+    
+    try:
+        # Initialize OpenAI client with custom or default URL
+        client = OpenAI(api_key=api_key, base_url=url_llm) if len(url_llm) > 1 else OpenAI(api_key=api_key)
+        logging.info(f"OpenAI client initialized with model: {model}")
+
+        # Measure time taken to generate a response
+        start_time = time.time()
+        response = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=request_data_params.get('temperature', 0.7),
+            max_tokens=request_data_params.get('max_tokens', 512),
+            top_p=request_data_params.get('top_p', 0.95),
+            frequency_penalty=request_data_params.get('frequency_penalty', 0),
+            presence_penalty=request_data_params.get('presence_penalty', 0),
+        )
+        response_time = time.time() - start_time
+        logging.info(f"OpenAI response generation time: {response_time:.4f} seconds")
+
+        # Extract and return the content of the response
+        response_content = response.choices[0].message.content
+        ##logging.info(f"OpenAI response received: {response_content}")
+        return response_content
+
+    except Exception as e:
+        logging.error(f"Error calling OpenAI API: {e}")
+        raise
+
+def retrieve_cache_from_semantic_api(embedding, semantic_cache_endpoint):
+    """
+    Recupera o cache de perguntas da API externa de cache semântico.
+    Retorna uma string (conteúdo do cache ou mensagem de erro).
+    """
+    url = semantic_cache_endpoint
+    headers = {"Content-Type": "application/json"}
+    payload = {
+        "embedding": embedding
+    }
+    try:
+        response = requests.post(url, headers=headers, json=payload, timeout=10)
+        response.raise_for_status()
+        return response.text  # Retorna string
+    except requests.RequestException as e:
+        logging.error(f"Erro ao recuperar cache semântico: {e}")
+        return None
+
+def write_cache_to_semantic_api(query_embedding, store_cache_endpoint, response):
+    """
+    Grava o cache de perguntas na API externa de cache semântico.
+    Retorna uma string (resposta da API ou mensagem de erro).
+    """
+    url = store_cache_endpoint
+    headers = {"Content-Type": "application/json"}
+    payload = {
+        "content": response,
+        "embedding": query_embedding
+    }
+    try:
+        response = requests.post(url, headers=headers, json=payload, timeout=10)
+        response.raise_for_status()
+        return response.text  # Retorna string
+    except requests.RequestException as e:
+        logging.error(f"Erro ao gravar cache semântico: {e}")
+        return None
+
 app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
- 
- 
-@app.route(route="upload", methods=["POST"])
+
+@app.route(route="RAG", methods=["POST"])
 async def main(req: func.HttpRequest) -> func.HttpResponse:
     """
-    Azure Function para receber arquivo, processar, gerar embeddings, criar índice no Redis e salvar no Blob Storage.
+    Azure Function endpoint to process requests for generating responses using RAG (Retrieve and Generate).
+
+    :param req: The HTTP request containing the necessary parameters for processing.
+    :return: HTTP response with the generated content or an error message.
     """
     logging.info('Processing HTTP POST request')
- 
-    redis_client = None  # Inicializa a variável redis_client
- 
+
+    # Measure total execution time of the function
+    start_time = time.time()
+
     try:
-        # Extrair parâmetros de conexão do Redis, OpenAI e configuração do processamento
-        required_params = {
-            'redis_host': req.form.get('redis_host'),
-            'redis_port': req.form.get('redis_port'),
-            'redis_password': req.form.get('redis_password'),
-            'openai_embedding_key': req.form.get('openai_embedding_key'),
-            'openai_embedding_model': req.form.get('openai_embedding_model'),
-            'azure_storage_connection_string': req.form.get('azure_storage_connection_string'),
-            'container_name': req.form.get('container_name'),
-            'chunk_size': req.form.get('chunk_size'),
-            'chunk_overlap': req.form.get('chunk_overlap'),
-            'title': req.form.get('title'),
-            'source': req.form.get('source')
-        }
- 
-        # Verificar parâmetros faltantes
-        missing_params = [key for key, value in required_params.items() if not value]
-        if missing_params:
-            logging.warning(f"Missing parameters: {', '.join(missing_params)}")
-            return func.HttpResponse(f"Missing parameters: {', '.join(missing_params)}", status_code=400)
- 
-        # Converter redis_port, chunk_size e chunk_overlap para inteiros
-        redis_port = int(required_params['redis_port'])
-        chunk_size = int(required_params['chunk_size'])
-        chunk_overlap = int(required_params['chunk_overlap'])
- 
-        # Configurar conexões e variáveis
-        os.environ["OPENAI_API_KEY"] = required_params['openai_embedding_key']
-        embeddings = OpenAIEmbeddings(model=required_params['openai_embedding_model'], openai_api_key=required_params['openai_embedding_key'])
- 
-        redis_client = redis.Redis(host=required_params['redis_host'], port=redis_port, password=required_params['redis_password'])
-        blob_service_client = BlobServiceClient.from_connection_string(required_params['azure_storage_connection_string'])
-        title = required_params['title']
-        source = required_params['source']
- 
-        # Processar o arquivo enviado
-        file = req.files.get('file')
-        if not file:
-            return func.HttpResponse("File is missing", status_code=400)
-       
-        file_name = sanitize_filename(file.filename)  # Sanitize the file name
-        file_extension = os.path.splitext(file_name)[1]  # Extrai a extensão do arquivo
-        temp_dir = tempfile.TemporaryDirectory()
-        file_path = os.path.join(temp_dir.name, file_name)
- 
-        with open(file_path, 'wb') as f:
-            f.write(file.stream.read())
- 
-        # Extração de conteúdo do arquivo
-        if file_extension == '.pdf':
-            content = extract_text_from_pdf(file_path)
-        elif file_extension == '.docx':
-            content = extract_text_from_docx(file_path)
-        elif file_extension == '.txt':
-            content = extract_text_from_txt(file_path)
+        req_body = req.get_json()
+        logging.debug(f"Request body: {req_body}")
+
+        # Extract required parameters from the request body
+        redis_host = req_body.get('redis_host')
+        redis_port = req_body.get('redis_port')
+        redis_password = req_body.get('redis_password')
+        semantic_cache_endpoint = req_body.get('semantic_cache_endpoint')
+        store_cache_endpoint = req_body.get('store_cache_endpoint') 
+        openai_embedding_key = req_body.get('openai_embedding_key')
+        openai_embedding_model = req_body.get('openai_embedding_model')
+        openai_llm_key = req_body.get('openai_llm_key')
+        openai_llm_model = req_body.get('openai_llm_model')
+        url_llm = req_body.get('url_llm')  # Custom URL for LLM, if specified
+        query = req_body.get('query')
+        rule = req_body.get('rule')
+        request_data_params = req_body.get('request_data')
+        top_n = req_body.get('top_n', 5)
+        messages = req_body.get('messages', [])
+        logging.debug(f"Messages: {messages}")
+
+        # Ensure all necessary parameters are provided
+        if not all([redis_host, redis_port, redis_password, openai_embedding_key, openai_embedding_model, openai_llm_key, openai_llm_model, query, rule, request_data_params]):
+            logging.warning("Missing one or more required parameters.")
+            return func.HttpResponse("Missing one or more required parameters.", status_code=400)
+
+        # Initialize OpenAI embeddings
+        os.environ["OPENAI_API_KEY"] = openai_embedding_key
+        embeddings = OpenAIEmbeddings(model=openai_embedding_model, openai_api_key=openai_embedding_key)
+        logging.info("Connected to OpenAI Embedding Model")
+
+        # Connect to Redis database
+        try:
+            r = redis.Redis(
+                host=redis_host,
+                port=redis_port,
+                password=redis_password
+            )
+            logging.info("Connected to Redis")
+        except Exception as e:
+            logging.error(f"Error connecting to Redis: {e}")
+            return func.HttpResponse(f"Error connecting to Redis: {str(e)}", status_code=500)
+        
+        # Log about conections time
+        conections_time = time.time() - start_time
+        logging.info(f"Function conections time: {conections_time:.4f} seconds")
+        query_embedding = embeddings.embed_query(query)
+        try:
+            # Recupera cache semântico de perguntas
+            cache_result = retrieve_cache_from_semantic_api(
+                embedding=query_embedding,
+                semantic_cache_endpoint=semantic_cache_endpoint,
+            )
+            if cache_result:
+                logging.info(f"Cache encontrado: {cache_result}")
+                return func.HttpResponse(str(cache_result), status_code=200)
+        except Exception as e:
+            logging.error(f"Erro ao recuperar cache semântico: {e}")
+        # Se não encontrou cache, grava no cache após gerar resposta
+        # Retrieve context from Redis
+        try:
+            context = retrieve_context_from_redis(query_embedding, r, top_n)
+        except Exception as e:
+            logging.error(f"Error retrieving context from Redis: {e}")
+            return func.HttpResponse(f"Error retrieving context from Redis: {str(e)}", status_code=500)
+        finally:
+            r.close()
+            logging.info("Redis connection closed")
+
+        # Append retrieved context to messages
+        if messages and messages[-1]['role'] == 'user':
+            messages[-1]['content'] += f"\n\nSiga a regra a seguir: {rule}\n\nContexto: {context}\n\nQuestion: {query}"
         else:
-            return func.HttpResponse(f"Unsupported file type: {file_extension}", status_code=400)
- 
-        # Divisão do conteúdo em chunks e geração de embeddings
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
-        documents = [Document(page_content=chunk) for chunk in text_splitter.split_text(content)]
-        texts = [doc.page_content for doc in documents]
-        doc_embeddings = get_embeddings_with_retry(texts, embeddings)
- 
-        # Criar índice no Redis
-        embedding_dimension = len(doc_embeddings[0])
-        create_redis_index(redis_client, "document_index", embedding_dimension)
- 
-        # Armazenar os documentos e embeddings no Redis
-        for i, doc_embedding in enumerate(doc_embeddings):
-            doc_id = f"doc:{file_name}:{i}"
-            embedding_array = np.array(doc_embedding, dtype=np.float32)
-            redis_client.hset(doc_id, mapping={"content": ('Titulo: ' + title + '\n\n' + texts[i] + '\n\nFonte: '+ source), "embedding": embedding_array.tobytes()})
- 
-        # Upload do arquivo para o Blob Storage
-        container_name = required_params['container_name']
-        blob_client = blob_service_client.get_blob_client(container=container_name, blob=file_name)
-        with open(file_path, "rb") as data:
-            blob_client.upload_blob(data, overwrite=True)
- 
-        # Fechar o diretório temporário
-        temp_dir.cleanup()
- 
-        logging.info("File processed, indexed, and uploaded successfully.")
-        return func.HttpResponse(f"{file_name}", status_code=200)
- 
+            messages.append({"role": "user", "content": f"Siga a regra a seguir: {rule}\n\nContexto: {context}\n\nQuestion: {query}"})
+
+        # Call OpenAI API to generate response
+        try:
+            response_content = get_openai_response(messages, openai_llm_model, openai_llm_key, url_llm, request_data_params)
+        except Exception as e:
+            logging.error(f"Error calling OpenAI API: {e}")
+            return func.HttpResponse(f"Error calling OpenAI API: {str(e)}", status_code=502)
+
+        # Grava no cache semântico se não encontrou antes
+        try:
+            write_cache_to_semantic_api(query_embedding=query_embedding, store_cache_endpoint=store_cache_endpoint,response=response_content )
+        except Exception as e:
+            logging.error(f"Erro ao gravar cache semântico: {e}")
+
+        # Check if response is complete and return it
+        if response_content:
+            logging.info("Response successfully generated")
+            total_execution_time = time.time() - start_time
+            logging.info(f"Total execution time: {total_execution_time:.4f} seconds")
+            return func.HttpResponse(response_content, status_code=200)
+        else:
+            logging.warning("Response incomplete")
+            return func.HttpResponse("Response incomplete. Check parameters and try again.", status_code=502)
+
+    except ValueError as e:
+        logging.error(f"Error parsing request: {e}")
+        return func.HttpResponse(f"Error parsing request: {str(e)}", status_code=400)
+    except PermissionError as e:
+        logging.error(f"Permission denied: {e}")
+        return func.HttpResponse(f"Permission denied: {str(e)}", status_code=403)
+    except ConnectionError as e:
+        logging.error(f"Error connecting to external service: {e}")
+        return func.HttpResponse(f"Error connecting to external service: {str(e)}", status_code=502)
     except Exception as e:
-        logging.error(f"Failed to process file: {e}")
-        return func.HttpResponse(f"An error occurred: {str(e)}", status_code=500)
- 
-    finally:
-        if redis_client:
-            redis_client.close()
-            logging.info("Redis connection closed")
- 
-@app.route(route="list-files", methods=["GET"])
-async def list_files(req: func.HttpRequest) -> func.HttpResponse:
-    required_params = {
-            'azure_storage_connection_string': req.form.get('azure_storage_connection_string'),
-            'container_name': req.form.get('container_name')
-        }
- 
-   
-    missing_params = [key for key, value in required_params.items() if not value]
-    if missing_params:
-        logging.warning(f"Missing parameters: {', '.join(missing_params)}")
-        return func.HttpResponse(f"Missing parameters: {', '.join(missing_params)}", status_code=400)
- 
-    try:
-        blob_service_client = BlobServiceClient.from_connection_string(required_params['azure_storage_connection_string'])
-        container_client = blob_service_client.get_container_client(required_params['container_name'])
-        blob_list = container_client.list_blobs()
- 
-        files = [blob.name for blob in blob_list]
-        return func.HttpResponse(f"Files: {', '.join(files)}", status_code=200)
-    except Exception as e:
-        logging.error(f"Error listing files: {e}")
-        return func.HttpResponse(f"An error occurred while listing files: {str(e)}", status_code=500)
- 
- 
-@app.route(route="delete-file", methods=["DELETE"])
-async def delete_file(req: func.HttpRequest) -> func.HttpResponse:
-    required_params = {
-            'redis_host': req.form.get('redis_host'),
-            'redis_port': req.form.get('redis_port'),
-            'redis_password': req.form.get('redis_password'),
-            'azure_storage_connection_string': req.form.get('azure_storage_connection_string'),
-            'container_name': req.form.get('container_name'),
-            'file_name': req.form.get('file_name')
-        }
- 
-   
-    missing_params = [key for key, value in required_params.items() if not value]
-    if missing_params:
-        logging.warning(f"Missing parameters: {', '.join(missing_params)}")
-        return func.HttpResponse(f"Missing parameters: {', '.join(missing_params)}", status_code=400)
- 
-    try:
-        # Conexão ao Redis
-        redis_client = redis.Redis(host=required_params['redis_host'], port=int(required_params['redis_port']), password=required_params['redis_password'])
-        # Deletar documentos do Redis
-        redis_keys = redis_client.keys(f"doc:{sanitize_filename(required_params['file_name'])}:*")
-        for key in redis_keys:
-            redis_client.delete(key)
- 
-        # Deletar arquivo do Blob Storage
-        blob_service_client = BlobServiceClient.from_connection_string(required_params['azure_storage_connection_string'])
-        blob_client = blob_service_client.get_blob_client(container=required_params['container_name'], blob=required_params['file_name'])
-        blob_client.delete_blob()
- 
-        return func.HttpResponse(f"File {required_params['file_name']} and associated Redis entries deleted successfully", status_code=200)
-    except Exception as e:
-        logging.error(f"Failed to delete file: {e}")
-        return func.HttpResponse(f"An error occurred: {str(e)}", status_code=500)
-    finally:
-        if redis_client:
-            redis_client.close()
-            logging.info("Redis connection closed")
+        logging.error(f"Unexpected error: {e}")
+        return func.HttpResponse(f"Unexpected error: {str(e)}", status_code=500)
