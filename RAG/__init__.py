@@ -6,7 +6,6 @@ import redis
 import numpy as np
 import requests
 from redis.commands.search.query import Query
-from sklearn.metrics.pairwise import cosine_similarity
 from langchain_openai import OpenAIEmbeddings
 from openai import OpenAI
 
@@ -128,10 +127,7 @@ def write_cache_to_semantic_api(query_embedding, store_cache_endpoint, response)
         logging.error(f"Erro ao gravar cache semântico: {e}")
         return None
 
-app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
-
-@app.route(route="RAG", methods=["POST"])
-async def main(req: func.HttpRequest) -> func.HttpResponse:
+def main(req: func.HttpRequest) -> func.HttpResponse:
     """
     Azure Function endpoint to process requests for generating responses using RAG (Retrieve and Generate).
 
