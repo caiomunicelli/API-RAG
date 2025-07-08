@@ -4,9 +4,14 @@ import time
 import azure.functions as func
 import redis
 import numpy as np
+import re
+import string
+import nltk
 from redis.commands.search.query import Query
 from langchain_openai import OpenAIEmbeddings
 from openai import OpenAI
+from nltk.corpus import stopwords
+from nltk.tokenize import word_tokenize
 
 # Configure logging settings
 logging.basicConfig(level=logging.INFO)
@@ -26,6 +31,7 @@ def retrieve_context_from_redis(query, redis_client, embeddings, top_n=5):
         logging.info("--->Embedding query")
         # Measure time taken to embed the query
         start_time = time.time()
+        cleaned_query = preprocess_query(query)
         query_embedding = embeddings.embed_query(query)
         query_embedding_np = np.array(query_embedding, dtype=np.float32)
         embedding_time = time.time() - start_time
@@ -57,6 +63,43 @@ def retrieve_context_from_redis(query, redis_client, embeddings, top_n=5):
     except Exception as e:
         logging.error(f"Error retrieving context from Redis: {e}")
         raise
+
+def preprocess_query(text):
+    # Baixa recursos necessários do NLTK se não existirem
+    try:
+        nltk.data.find('tokenizers/punkt')
+    except LookupError:
+        nltk.download('punkt')
+    try:
+        nltk.data.find('corpora/stopwords')
+    except LookupError:
+        nltk.download('stopwords')
+    # Corrige erro raro do Azure: busca por 'punkt_tab' (legacy)
+    try:
+        nltk.data.find('tokenizers/punkt_tab')
+    except LookupError:
+        try:
+            nltk.download('punkt_tab')
+        except:
+            pass
+    # Minúsculas
+    logging.info(text)
+    text = text.lower()
+
+    # Remove pontuação
+    text = re.sub(rf"[{re.escape(string.punctuation)}]", "", text)
+
+    # Tokenização
+    tokens = word_tokenize(text)
+
+    # Stopwords em português + inglês
+    stop_words = set(stopwords.words("portuguese") + stopwords.words("english"))
+    tokens = [word for word in tokens if word not in stop_words]
+
+    # Reconstrói o texto limpo
+    logging.info(" ".join(tokens))
+
+    return " ".join(tokens)
 
 def get_openai_response(messages, model, api_key, url_llm, request_data_params):
     """
@@ -99,10 +142,9 @@ def get_openai_response(messages, model, api_key, url_llm, request_data_params):
         logging.error(f"Error calling OpenAI API: {e}")
         raise
 
-app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
-
-@app.route(route="RAG", methods=["POST"])
-async def main(req: func.HttpRequest) -> func.HttpResponse:
+def main(req: func.HttpRequest) -> func.HttpResponse:
+    nltk.download("stopwords")
+    nltk.download("wordnet")
     """
     Azure Function endpoint to process requests for generating responses using RAG (Retrieve and Generate).
 
