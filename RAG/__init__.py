@@ -1,12 +1,12 @@
 import logging
 import os
 import time
-import azure.functions as func
 import redis
 import numpy as np
 import re
 import string
 import nltk
+import azure.functions as func  # Mantido para tipagem
 from redis.commands.search.query import Query
 from langchain_openai import OpenAIEmbeddings
 from openai import OpenAI
@@ -15,6 +15,36 @@ from nltk.tokenize import word_tokenize
 
 # Configure logging settings
 logging.basicConfig(level=logging.INFO)
+
+# Download NLTK resources during cold start
+def download_nltk_resources():
+    """
+    Downloads required NLTK resources during function initialization.
+    This is called only once when the function app starts.
+    """
+    resources = {
+        'tokenizers/punkt': 'punkt',
+        'corpora/stopwords': 'stopwords',
+        'tokenizers/punkt_tab': 'punkt_tab',  # Legacy resource for Azure compatibility
+        'corpora/wordnet': 'wordnet'
+    }
+    
+    for resource_path, package in resources.items():
+        try:
+            nltk.data.find(resource_path)
+            logging.info(f"NLTK resource {resource_path} already exists")
+        except LookupError:
+            try:
+                logging.info(f"Downloading NLTK resource: {package}")
+                nltk.download(package)
+                logging.info(f"Successfully downloaded {package}")
+            except Exception as e:
+                logging.error(f"Failed to download {package}: {str(e)}")
+                if package != 'punkt_tab':  # Only raise for critical resources
+                    raise
+
+# Download resources during cold start
+download_nltk_resources()
 
 def retrieve_context_from_redis(query, redis_client, embeddings, top_n=5):
     """
@@ -32,7 +62,7 @@ def retrieve_context_from_redis(query, redis_client, embeddings, top_n=5):
         # Measure time taken to embed the query
         start_time = time.time()
         cleaned_query = preprocess_query(query)
-        query_embedding = embeddings.embed_query(query)
+        query_embedding = embeddings.embed_query(cleaned_query)
         query_embedding_np = np.array(query_embedding, dtype=np.float32)
         embedding_time = time.time() - start_time
         logging.info(f"Embedding time: {embedding_time:.4f} seconds")
@@ -64,42 +94,47 @@ def retrieve_context_from_redis(query, redis_client, embeddings, top_n=5):
         logging.error(f"Error retrieving context from Redis: {e}")
         raise
 
-def preprocess_query(text):
-    # Baixa recursos necessários do NLTK se não existirem
-    try:
-        nltk.data.find('tokenizers/punkt')
-    except LookupError:
-        nltk.download('punkt')
-    try:
-        nltk.data.find('corpora/stopwords')
-    except LookupError:
-        nltk.download('stopwords')
-    # Corrige erro raro do Azure: busca por 'punkt_tab' (legacy)
-    try:
-        nltk.data.find('tokenizers/punkt_tab')
-    except LookupError:
-        try:
-            nltk.download('punkt_tab')
-        except:
-            pass
-    # Minúsculas
-    logging.info(text)
-    text = text.lower()
-
-    # Remove pontuação
-    text = re.sub(rf"[{re.escape(string.punctuation)}]", "", text)
-
+def preprocess_query(text: str) -> str:
+    """
+    Processa e limpa o texto da query para melhorar a qualidade da busca.
+    
+    Args:
+        text (str): O texto original da query
+        
+    Returns:
+        str: O texto processado e limpo
+        
+    Etapas:
+        1. Normalização do texto (minúsculas, espaços)
+        2. Remoção de caracteres especiais e pontuação
+        3. Tokenização
+        4. Remoção de stopwords (português e inglês)
+    """
+    logging.info(f"Iniciando processamento da query: {text}")
+    
+    # Normalização básica
+    processed_text_without = text
+    text = text.lower().strip()
+    logging.debug(f"Texto normalizado: {text}")
+    
+    # Remove caracteres especiais e pontuação
+    text = re.sub(r'[^\w\s]', '', text)
+    text = re.sub(r'\s+', ' ', text)  # Normaliza espaços múltiplos
+    logging.debug(f"Texto após remoção de caracteres especiais: {text}")
+    
     # Tokenização
     tokens = word_tokenize(text)
-
-    # Stopwords em português + inglês
+    logging.debug(f"Tokens gerados: {tokens}")
+    
+    # Remove stopwords (português + inglês)
     stop_words = set(stopwords.words("portuguese") + stopwords.words("english"))
-    tokens = [word for word in tokens if word not in stop_words]
-
-    # Reconstrói o texto limpo
-    logging.info(" ".join(tokens))
-
-    return " ".join(tokens)
+    tokens = [word for word in tokens if word not in stop_words and len(word) > 1]  # Remove tokens de 1 caractere
+    logging.debug(f"Tokens após remoção de stopwords: {tokens}")
+    
+    processed_text = " ".join(tokens)
+    logging.info(f"Query processada: {processed_text_without}")
+    
+    return processed_text
 
 def get_openai_response(messages, model, api_key, url_llm, request_data_params):
     """
@@ -143,8 +178,6 @@ def get_openai_response(messages, model, api_key, url_llm, request_data_params):
         raise
 
 def main(req: func.HttpRequest) -> func.HttpResponse:
-    nltk.download("stopwords")
-    nltk.download("wordnet")
     """
     Azure Function endpoint to process requests for generating responses using RAG (Retrieve and Generate).
 
@@ -218,23 +251,23 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             messages[-1]['content'] += f"\n\nSiga a regra a seguir: {rule}\n\nContexto: {context}\n\nQuestion: {query}"
         else:
             messages.append({"role": "user", "content": f"Siga a regra a seguir: {rule}\n\nContexto: {context}\n\nQuestion: {query}"})
-
+        logging.info(f" context: {context}")
         # Call OpenAI API to generate response
-        try:
-            response_content = get_openai_response(messages, openai_llm_model, openai_llm_key, url_llm, request_data_params)
-        except Exception as e:
-            logging.error(f"Error calling OpenAI API: {e}")
-            return func.HttpResponse(f"Error calling OpenAI API: {str(e)}", status_code=502)
+        # try:
+        #     response_content = get_openai_response(messages, openai_llm_model, openai_llm_key, url_llm, request_data_params)
+        # except Exception as e:
+        #     logging.error(f"Error calling OpenAI API: {e}")
+        #     return func.HttpResponse(f"Error calling OpenAI API: {str(e)}", status_code=502)      
 
         # Check if response is complete and return it
-        if response_content:
-            logging.info("Response successfully generated")
-            total_execution_time = time.time() - start_time
-            logging.info(f"Total execution time: {total_execution_time:.4f} seconds")
-            return func.HttpResponse(response_content, status_code=200)
-        else:
-            logging.warning("Response incomplete")
-            return func.HttpResponse("Response incomplete. Check parameters and try again.", status_code=502)
+        # if response_content:
+        #     logging.info("Response successfully generated")
+        #     total_execution_time = time.time() - start_time
+        #     logging.info(f"Total execution time: {total_execution_time:.4f} seconds")
+        #     return func.HttpResponse(response_content, status_code=200)
+        # else:
+        #     logging.warning("Response incomplete")
+        #     return func.HttpResponse("Response incomplete. Check parameters and try again.", status_code=502)
 
     except ValueError as e:
         logging.error(f"Error parsing request: {e}")
