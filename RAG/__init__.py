@@ -113,7 +113,6 @@ def preprocess_query(text: str) -> str:
     logging.info(f"Iniciando processamento da query: {text}")
     
     # Normalização básica
-    processed_text_without = text
     text = text.lower().strip()
     logging.debug(f"Texto normalizado: {text}")
     
@@ -132,7 +131,7 @@ def preprocess_query(text: str) -> str:
     logging.debug(f"Tokens após remoção de stopwords: {tokens}")
     
     processed_text = " ".join(tokens)
-    logging.info(f"Query processada: {processed_text_without}")
+    logging.info(f"Query processada: {processed_text}")
     
     return processed_text
 
