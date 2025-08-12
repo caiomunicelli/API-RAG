@@ -9,3 +9,4 @@ langchain-openai
 openai>=1.0.0
 python-jose
 azurefunctions-extensions-http-fastapi
+tiktoken

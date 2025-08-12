@@ -5,6 +5,7 @@ import azure.functions as func
 import redis
 import numpy as np
 import requests
+import tiktoken
 from redis.commands.search.query import Query
 from langchain_openai import OpenAIEmbeddings
 from openai import OpenAI
@@ -103,6 +104,10 @@ def retrieve_cache_from_semantic_api(embedding, semantic_cache_endpoint):
     try:
         response = requests.post(url, headers=headers, json=payload, timeout=10)
         response.raise_for_status()
+        # Usa o tokenizador do GPT-4 para contar tokens com precisão
+        enc = tiktoken.encoding_for_model("gpt-4o")
+        num_tokens = len(enc.encode(response.text))
+        logging.info(f"Número exato de tokens no cache (GPT-4o): {num_tokens}")
         return response.text  # Retorna string
     except requests.RequestException as e:
         logging.error(f"Erro ao recuperar cache semântico: {e}")
