@@ -12,6 +12,14 @@ from langchain_openai import OpenAIEmbeddings
 from openai import OpenAI
 from nltk.corpus import stopwords
 from nltk.tokenize import word_tokenize
+import tiktoken
+
+def num_tokens_from_string(string: str, model: str) -> int:
+    """
+    Returns the number of tokens in a text string for a specific model.
+    """
+    encoding = tiktoken.encoding_for_model(model)
+    return len(encoding.encode(string))
 
 # Configure logging settings
 logging.basicConfig(level=logging.INFO)
@@ -169,7 +177,8 @@ def get_openai_response(messages, model, api_key, url_llm, request_data_params):
 
         # Extract and return the content of the response
         response_content = response.choices[0].message.content
-        ##logging.info(f"OpenAI response received: {response_content}")
+        output_tokens = num_tokens_from_string(response_content, model)
+        logging.info(f"Output tokens count: {output_tokens}")
         return response_content
 
     except Exception as e:
@@ -246,27 +255,33 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             logging.info("Redis connection closed")
 
         # Append retrieved context to messages
+        message_content = f"Siga a regra a seguir: {rule}\n\nContexto: {context}\n\nQuestion: {query}"
         if messages and messages[-1]['role'] == 'user':
-            messages[-1]['content'] += f"\n\nSiga a regra a seguir: {rule}\n\nContexto: {context}\n\nQuestion: {query}"
+            messages[-1]['content'] += message_content
         else:
-            messages.append({"role": "user", "content": f"Siga a regra a seguir: {rule}\n\nContexto: {context}\n\nQuestion: {query}"})
-        logging.info(f" context: {context}")
+            messages.append({"role": "user", "content": message_content})
+        
+        # Log context and token counts
+      #  logging.info(f"context: {context.replace(chr(10), ' ').replace(chr(13), '').strip()}")
+        input_tokens = num_tokens_from_string(message_content, openai_llm_model)
+        logging.info(f"Input tokens count: {input_tokens}")
+        
         # Call OpenAI API to generate response
-        # try:
-        #     response_content = get_openai_response(messages, openai_llm_model, openai_llm_key, url_llm, request_data_params)
-        # except Exception as e:
-        #     logging.error(f"Error calling OpenAI API: {e}")
-        #     return func.HttpResponse(f"Error calling OpenAI API: {str(e)}", status_code=502)      
+        try:
+            response_content = get_openai_response(messages, openai_llm_model, openai_llm_key, url_llm, request_data_params)
+        except Exception as e:
+            logging.error(f"Error calling OpenAI API: {e}")
+            return func.HttpResponse(f"Error calling OpenAI API: {str(e)}", status_code=502)      
 
         # Check if response is complete and return it
-        # if response_content:
-        #     logging.info("Response successfully generated")
-        #     total_execution_time = time.time() - start_time
-        #     logging.info(f"Total execution time: {total_execution_time:.4f} seconds")
-        #     return func.HttpResponse(response_content, status_code=200)
-        # else:
-        #     logging.warning("Response incomplete")
-        #     return func.HttpResponse("Response incomplete. Check parameters and try again.", status_code=502)
+        if response_content:
+            logging.info("Response successfully generated")
+            total_execution_time = time.time() - start_time
+            logging.info(f"Total execution time: {total_execution_time:.4f} seconds")
+            return func.HttpResponse(response_content, status_code=200)
+        else:
+            logging.warning("Response incomplete")
+            return func.HttpResponse("Response incomplete. Check parameters and try again.", status_code=502)
 
     except ValueError as e:
         logging.error(f"Error parsing request: {e}")
