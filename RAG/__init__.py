@@ -66,7 +66,6 @@ def retrieve_context_from_redis(query, redis_client, embeddings, top_n=5):
     """
 
     try:
-        logging.info("--->Embedding query")
         # Measure time taken to embed the query
         start_time = time.time()
         cleaned_query = preprocess_query(query)
