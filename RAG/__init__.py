@@ -88,9 +88,6 @@ def retrieve_cache_from_semantic_api(embedding, semantic_cache_endpoint):
             timeout=10
         )
         response.raise_for_status()
-        enc = tiktoken.encoding_for_model("gpt-4o")
-        num_tokens = len(enc.encode(response.text))
-        logging.info(f"Número exato de tokens no cache (GPT-4o): {num_tokens}")
         return response.text
     except requests.RequestException as e:
         logging.error(f"Erro ao recuperar cache semântico: {e}")
