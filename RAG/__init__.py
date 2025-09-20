@@ -12,12 +12,8 @@ from langchain_openai import OpenAIEmbeddings
 from openai import OpenAI
 from nltk.corpus import stopwords
 from nltk.tokenize import word_tokenize
-import tiktoken
 import requests
 
-def num_tokens_from_string(string: str, model: str) -> int:
-    encoding = tiktoken.encoding_for_model(model)
-    return len(encoding.encode(string))
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -132,8 +128,6 @@ def get_openai_response(messages, model, api_key, url_llm, request_data_params):
         response_time = time.time() - start_time
         logging.info(f"OpenAI response generation time: {response_time:.4f} seconds")
         response_content = response.choices[0].message.content
-        output_tokens = num_tokens_from_string(response_content, model)
-        logging.info(f"Output tokens count: {output_tokens}")
         return response_content
     except Exception as e:
         logging.error(f"Error calling OpenAI API: {e}")
@@ -198,9 +192,6 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             messages[-1]['content'] += message_content
         else:
             messages.append({"role": "user", "content": message_content})
-
-        input_tokens = num_tokens_from_string(message_content, openai_llm_model)
-        logging.info(f"Input tokens count: {input_tokens}")
 
         try:
             response_content = get_openai_response(messages, openai_llm_model, openai_llm_key, url_llm, request_data_params)
