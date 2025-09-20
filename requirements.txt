@@ -12,4 +12,5 @@ python-jose>=3.3.0
 requests>=2.31.0
 tiktoken>=0.5.1
 azurefunctions-extensions-http-fastapi
+redisearch-py>=2.0.0
 

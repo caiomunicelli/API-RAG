@@ -153,10 +153,9 @@ def get_openai_response(messages, model, api_key, url_llm, request_data_params, 
     return StreamingResponse(event_generator(), media_type="text/event-stream; charset=utf-8")
 
 # ------------------- Azure Function -------------------
-app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
 
-@app.route(route="RAG", methods=["POST"])
-async def main(req: Request) -> StreamingResponse:
+async def main(req: func.HttpRequest) -> StreamingResponse:
+
     logging.info('Processing HTTP POST request')
     start_time = time.time()
 
@@ -209,7 +208,7 @@ async def main(req: Request) -> StreamingResponse:
     if cache_result:
         logging.info("Cache semântico encontrado.")
         r.close()
-        return StreamingResponse((f"data: {cache_result}\n\n" for _ in [0]), media_type="text/event-stream")
+        return StreamingResponse(stream_cache_result(cache_result), media_type="text/event-stream")
 
     # --------- 2. Se não achou no cache, busca Redis ---------
     try:
