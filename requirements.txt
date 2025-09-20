@@ -11,3 +11,5 @@ openai>=1.0.0
 python-jose>=3.3.0
 requests>=2.31.0
 tiktoken>=0.5.1
+azurefunctions-extensions-http-fastapi
+
