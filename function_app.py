@@ -116,6 +116,20 @@ def write_cache_to_semantic_api(query_embedding, store_cache_endpoint, response)
         logging.error(f"Erro ao gravar cache semântico: {e}")
         return None
 
+def stream_cache_result(cache_result: str, chunk_size: int = 200):
+    sentences = re.split(r'(?<=[.!?])\s+', cache_result)  # quebra por pontuação
+    buffer = ""
+    for sentence in sentences:
+        if len(buffer) + len(sentence) + 1 <= chunk_size:
+            buffer += (" " if buffer else "") + sentence
+        else:
+            yield f"data: {buffer}\n\n"
+            buffer = sentence
+    if buffer:
+        yield f"data: {buffer}\n\n"
+    yield "event: end\ndata: [DONE]\n\n"
+
+        
 # ------------------- OpenAI Streaming -------------------
 def get_openai_response(messages, model, api_key, url_llm, request_data_params, start_time, query_embedding=None, store_cache_endpoint=None):
     logging.info("Initializing OpenAI client for streaming")
@@ -153,9 +167,10 @@ def get_openai_response(messages, model, api_key, url_llm, request_data_params, 
     return StreamingResponse(event_generator(), media_type="text/event-stream; charset=utf-8")
 
 # ------------------- Azure Function -------------------
+app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
 
-async def main(req: func.HttpRequest) -> StreamingResponse:
-
+@app.route(route="RAG", methods=["POST"])
+async def main(req: Request) -> StreamingResponse:
     logging.info('Processing HTTP POST request')
     start_time = time.time()
 
