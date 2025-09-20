@@ -2,11 +2,14 @@
 # The Python Worker is managed by Azure Functions platform
 # Manually managing azure-functions-worker may cause unexpected issues
 
-azure-functions
-redis
-numpy
-langchain-openai
+azure-functions>=1.17.0
+redis>=5.0.1
+numpy>=1.26.0
+nltk>=3.8.1
+langchain-openai>=0.0.2
 openai>=1.0.0
-python-jose
+python-jose>=3.3.0
+requests>=2.31.0
+tiktoken>=0.5.1
 azurefunctions-extensions-http-fastapi
-tiktoken
+
