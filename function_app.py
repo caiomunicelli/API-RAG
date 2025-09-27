@@ -1,3 +1,4 @@
+import tiktoken
 import logging
 import os
 import time
@@ -171,11 +172,19 @@ async def main(req: func.HttpRequest) -> func.HttpResponse:
             r.close()
             logging.info("Redis connection closed")
 
-        # Append retrieved context to messages
+        # Monta o texto enviado ao GPT
+        user_content = f"Siga a regra a seguir: {rule}\n\nContexto: {context}\n\nQuestion: {query}"
         if messages and messages[-1]['role'] == 'user':
-            messages[-1]['content'] += f"\n\nSiga a regra a seguir: {rule}\n\nContexto: {context}\n\nQuestion: {query}"
+            messages[-1]['content'] += "\n\n" + user_content
         else:
-            messages.append({"role": "user", "content": f"Siga a regra a seguir: {rule}\n\nContexto: {context}\n\nQuestion: {query}"})
+            messages.append({"role": "user", "content": user_content})
+
+        # Cálculo dos tokens de entrada usando tiktoken
+        try:
+            enc = tiktoken.encoding_for_model(openai_llm_model)
+        except Exception:
+            enc = tiktoken.get_encoding("cl100k_base")
+        tokens_entrada = len(enc.encode(user_content))
 
         # Call OpenAI API to generate response
         try:
@@ -184,12 +193,12 @@ async def main(req: func.HttpRequest) -> func.HttpResponse:
             logging.error(f"Error calling OpenAI API: {e}")
             return func.HttpResponse(f"Error calling OpenAI API: {str(e)}", status_code=502)
 
-        # Check if response is complete and return it
+        # Check if response is complete and return it, incluindo header de tokens
         if response_content:
             logging.info("Response successfully generated")
             total_execution_time = time.time() - start_time
             logging.info(f"Total execution time: {total_execution_time:.4f} seconds")
-            return func.HttpResponse(response_content, status_code=200)
+            return func.HttpResponse(response_content, status_code=200, headers={"tokens-entrada": str(tokens_entrada)})
         else:
             logging.warning("Response incomplete")
             return func.HttpResponse("Response incomplete. Check parameters and try again.", status_code=502)
