@@ -14,6 +14,8 @@ from nltk.tokenize import word_tokenize
 import requests
 from threading import Thread
 from azurefunctions.extensions.http.fastapi import StreamingResponse, Request
+# Adiciona tiktoken para cálculo de tokens
+import tiktoken
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -131,7 +133,7 @@ def stream_cache_result(cache_result: str, chunk_size: int = 200):
 
         
 # ------------------- OpenAI Streaming -------------------
-def get_openai_response(messages, model, api_key, url_llm, request_data_params, start_time, query_embedding=None, store_cache_endpoint=None):
+def get_openai_response(messages, model, api_key, url_llm, request_data_params, start_time, query_embedding=None, store_cache_endpoint=None, tokens_entrada=None):
     logging.info("Initializing OpenAI client for streaming")
     params = {
         "temperature": request_data_params.get('temperature', 0.7),
@@ -164,7 +166,9 @@ def get_openai_response(messages, model, api_key, url_llm, request_data_params, 
             logging.info(f"Total time: {total:.4f}s")
             yield "event: end\ndata: [DONE]\n\n"
 
-    return StreamingResponse(event_generator(), media_type="text/event-stream; charset=utf-8")
+    # Adiciona o header com tokens de entrada
+    headers = {"tokens-entrada": str(tokens_entrada) if tokens_entrada is not None else "0"}
+    return StreamingResponse(event_generator(), media_type="text/event-stream; charset=utf-8", headers=headers)
 
 # ------------------- Azure Function -------------------
 app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
@@ -243,5 +247,13 @@ async def main(req: Request) -> StreamingResponse:
     else:
         messages.append({"role": "user", "content": user_content})
 
+
+    # --------- Cálculo de tokens de entrada
+    try:
+        enc = tiktoken.encoding_for_model(openai_llm_model)
+    except Exception:
+        enc = tiktoken.get_encoding("cl100k_base")
+    tokens_entrada = len(enc.encode(user_content))
+
     # --------- 3. Streaming ---------
-    return get_openai_response(messages, openai_llm_model, openai_llm_key, url_llm, request_data_params, start_time, query_embedding, store_cache_endpoint)
+    return get_openai_response(messages, openai_llm_model, openai_llm_key, url_llm, request_data_params, start_time, query_embedding, store_cache_endpoint, tokens_entrada)
