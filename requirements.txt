@@ -8,3 +8,4 @@ numpy
 langchain-openai
 openai>=1.0.0
 python-jose
+tiktoken
